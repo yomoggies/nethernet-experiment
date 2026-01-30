@@ -41,5 +41,5 @@ require (
 
 replace (
 	github.com/df-mc/go-nethernet => github.com/lactyy/go-nethernet v1.0.0-alpha.2.0.20260107091143-efab6f57a8d4
-	github.com/df-mc/go-xsapi => github.com/lactyy/go-xsapi v0.0.0-20260122172944-672783253e6f
+	github.com/df-mc/go-xsapi => github.com/lactyy/go-xsapi v0.0.0-20260129205551-ec7c13aed847
 )

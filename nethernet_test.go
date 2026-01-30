@@ -21,13 +21,17 @@ func newJSONRPCSignaling(t testing.TB, conn *websocket.Conn, messagingID uuid.UU
 
 		conn:           conn,
 		notifiers:      make(map[int]chan<- *nethernet.Signal),
-		networkIDs:     make(map[string]networkIDMapping),
 		messagingID:    messagingID,
 		localNetworkID: networkID,
+
+		expected: make(map[uuid.UUID]chan<- error),
 	}
 	j.client = jrpc2.NewClient(&websocketChannel{conn}, &jrpc2.ClientOptions{
 		OnCallback: j.handleCallback,
 	})
+	var cancel context.CancelCauseFunc
+	j.ctx, cancel = context.WithCancelCause(context.Background())
+	go j.background(cancel)
 	return j
 }
 
@@ -46,8 +50,36 @@ type jsonrpcSignaling struct {
 	credentialsTime time.Time
 	credentialsMu   sync.Mutex
 
-	networkIDs   map[string]networkIDMapping
-	networkIDsMu sync.Mutex
+	expected   map[uuid.UUID]chan<- error
+	expectedMu sync.Mutex
+
+	ctx context.Context
+}
+
+func (j *jsonrpcSignaling) background(cancel context.CancelCauseFunc) {
+	ticker := time.NewTicker(time.Second * 15)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if err := j.ping(); err != nil {
+			cancel(fmt.Errorf("error pinging: %w", err))
+			return
+		}
+	}
+}
+
+func (j *jsonrpcSignaling) ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	resp, err := j.client.Call(ctx, "System_Ping_v1_0", map[string]any{})
+	if err != nil {
+		return err
+	}
+	if resp.Error() != nil {
+		return resp.Error()
+	}
+	return nil
 }
 
 func (j *jsonrpcSignaling) handleCallback(ctx context.Context, req *jrpc2.Request) (result any, err error) {
@@ -75,6 +107,7 @@ func (j *jsonrpcSignaling) handleCallback(ctx context.Context, req *jrpc2.Reques
 				return nil, fmt.Errorf("handle %q: invalid batch message in params", req.Method())
 			}
 
+			fmt.Println(inner.Method, string(inner.Params))
 			switch inner.Method {
 			case "Signaling_WebRtc_v1_0":
 				var params struct {
@@ -103,12 +136,12 @@ func (j *jsonrpcSignaling) handleCallback(ctx context.Context, req *jrpc2.Reques
 					"jsonrpc": "2.0",
 					"method":  "Signaling_DeliveryNotification_V1_0",
 					"params": map[string]any{
-						"netherNetId": j.localNetworkID,
+						"messageId": msg.ID,
 					},
 				})
 				resp, err := j.client.Call(ctx, "Signaling_SendClientMessage_v1_0", map[string]any{
 					"toPlayerId": msg.From,
-					"messageId":  msg.ID,
+					"messageId":  uuid.New(),
 					"message":    string(b),
 				})
 				if err != nil {
@@ -119,6 +152,19 @@ func (j *jsonrpcSignaling) handleCallback(ctx context.Context, req *jrpc2.Reques
 				}
 				return nil, nil
 			case "Signaling_DeliveryNotification_V1_0":
+				var params struct {
+					MessageID uuid.UUID `json:"messageId"`
+				}
+				if err := json.Unmarshal(inner.Params, &params); err != nil {
+					return nil, fmt.Errorf("handle %q: decode inner parameters: %w", req.Method(), err)
+				}
+				fmt.Println(params.MessageID)
+				if params.MessageID == uuid.Nil {
+					return nil, fmt.Errorf("handle %q: message ID is nil", req.Method())
+				}
+				j.complete(params.MessageID, nil)
+				continue
+			case "System_Pong_v1_0":
 				continue
 			default:
 				return nil, fmt.Errorf("handle %q: invalid inner message method: %q", req.Method(), inner.Method)
@@ -130,8 +176,42 @@ func (j *jsonrpcSignaling) handleCallback(ctx context.Context, req *jrpc2.Reques
 	}
 }
 
+func (j *jsonrpcSignaling) expect(id uuid.UUID) <-chan error {
+	ch := make(chan error)
+	j.expectedMu.Lock()
+	j.expected[id] = ch
+	j.expectedMu.Unlock()
+	return ch
+}
+
+func (j *jsonrpcSignaling) release(id uuid.UUID) {
+	j.expectedMu.Lock()
+	ch, ok := j.expected[id]
+	if ok {
+		close(ch)
+	}
+	j.expectedMu.Unlock()
+}
+
+func (j *jsonrpcSignaling) complete(id uuid.UUID, err error) {
+	j.expectedMu.Lock()
+	ch, ok := j.expected[id]
+	if ok {
+		ch <- err
+	}
+	j.expectedMu.Unlock()
+}
+
 func (j *jsonrpcSignaling) Signal(ctx context.Context, signal *nethernet.Signal) error {
-	// j.t.Logf("Signal(%s)", signal)
+	j.t.Logf("Signal(%s)", signal)
+
+	defer func() {
+		fmt.Println(recover())
+	}()
+
+	id := uuid.New()
+	ch := j.expect(id)
+	defer j.release(id)
 
 	// This is half-encoded JSONRPC 2.0 Message, but it isn't exported in the jrpc2 package.
 	b, err := json.Marshal(map[string]any{
@@ -145,20 +225,31 @@ func (j *jsonrpcSignaling) Signal(ctx context.Context, signal *nethernet.Signal)
 	messagingID := uuid.MustParse(signal.NetworkID)
 	resp, err := j.client.Call(ctx, "Signaling_SendClientMessage_v1_0", map[string]any{
 		"toPlayerId": messagingID,
-		"messageId":  uuid.New(), //< A unique ID associated to each message sent by the client.
+		"messageId":  id, //< A unique ID associated to each message sent by the client.
 		"message":    string(b),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("call Signaling_SendClientMessage_v1_0: %w", err)
 	}
 	if resp.Error() != nil {
 		return resp.Error()
+	}
+
+	if signal.Type == nethernet.SignalTypeOffer {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-j.ctx.Done():
+			return context.Cause(j.ctx)
+		case err := <-ch:
+			return err
+		}
 	}
 	return nil
 }
 
 func (j *jsonrpcSignaling) Notify(ch chan<- *nethernet.Signal) (stop func()) {
-	// j.t.Logf("Notify(%#v)", ch)
+	j.t.Logf("Notify(%#v)", ch)
 
 	j.notifiersMu.Lock()
 	i := j.notifyCount
@@ -179,7 +270,7 @@ func (j *jsonrpcSignaling) Context() context.Context {
 }
 
 func (j *jsonrpcSignaling) Credentials(ctx context.Context) (*nethernet.Credentials, error) {
-	// j.t.Logf("Credentials(%#v)", ctx)
+	j.t.Logf("Credentials(%#v)", ctx)
 
 	j.credentialsMu.Lock()
 	defer j.credentialsMu.Unlock()
@@ -207,9 +298,3 @@ func (j *jsonrpcSignaling) NetworkID() string {
 }
 
 func (j *jsonrpcSignaling) PongData([]byte) {}
-
-type networkIDMapping struct {
-	networkID   string
-	messagingID uuid.UUID
-	t           time.Time
-}

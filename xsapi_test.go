@@ -13,6 +13,7 @@ import (
 	"github.com/df-mc/go-xsapi/mpsd"
 	"github.com/df-mc/go-xsapi/xal"
 	"github.com/df-mc/go-xsapi/xal/sisu"
+	"github.com/df-mc/go-xsapi/xal/xasd"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
@@ -20,8 +21,21 @@ import (
 
 func auth(t testing.TB) (oauth2.TokenSource, *sisu.Session) {
 	msa := readToken(t, tokenPath)
-	src := oauth2.StaticTokenSource(msa)
+	device, proofKey := readDevice(t, deviceSnapshotPath)
+	deviceTokenSource := xasd.ReuseTokenSource(MinecraftAndroid.Config, device, proofKey)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*15)
+		defer cancel()
+
+		token, err := deviceTokenSource.DeviceToken(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeDevice(t, deviceSnapshotPath, token, deviceTokenSource.ProofKey())
+	})
+	src := MinecraftAndroid.TokenSource(t.Context(), msa)
 	sc := &sisu.SessionConfig{}
+	sc.DeviceTokenSource = deviceTokenSource
 	sc.Snapshot = readSnapshot(t, snapshotPath)
 	s := MinecraftAndroid.New(src, sc)
 	t.Cleanup(func() {
@@ -34,6 +48,51 @@ func auth(t testing.TB) (oauth2.TokenSource, *sisu.Session) {
 
 	return src, s
 }
+
+func readDevice(t testing.TB, path string) (*xasd.Token, *ecdsa.PrivateKey) {
+	if stat, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, nil
+	} else if err != nil {
+		t.Fatalf("stat %q: %s", path, err)
+	} else if stat.IsDir() {
+		t.Fatalf("%q is a directory", path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("error reading device snapshot: %s", err)
+	}
+	var snapshot *deviceTokenSnapshot
+	if err := json.Unmarshal(b, &snapshot); err != nil {
+		t.Fatalf("error decoding device snapshot: %s", err)
+	}
+	return snapshot.DeviceToken, snapshot.ProofKey.Key.(*ecdsa.PrivateKey)
+}
+
+func writeDevice(t testing.TB, path string, token *xasd.Token, proofKey *ecdsa.PrivateKey) {
+	b, err := json.Marshal(&deviceTokenSnapshot{
+		ProofKey: jose.JSONWebKey{
+			Key:       proofKey,
+			Algorithm: string(jose.ES256),
+			Use:       "sig",
+		},
+		DeviceToken: token,
+	})
+	if err != nil {
+		t.Fatalf("error encoding device token snapshot: %s", err)
+	}
+	if err := os.WriteFile(path, b, os.ModePerm); err != nil {
+		t.Fatalf("error writing device token snapshot: %s", err)
+	}
+}
+
+type deviceTokenSnapshot struct {
+	ProofKey    jose.JSONWebKey
+	DeviceToken *xasd.Token
+}
+
+var (
+	deviceSnapshotPath = filepath.Join(testdataDir, "device.token")
+)
 
 func publishSession(t testing.TB, client *xsapi.Client, networkID uint64, messagingID uuid.UUID) *mpsd.Session {
 	// addFriend(t, client, "2535428765332540")
@@ -101,15 +160,15 @@ func readSnapshot(t testing.TB, path string) *sisu.Snapshot {
 	if err != nil {
 		t.Fatalf("error reading session snapshot: %s", path)
 	}
-	var s *jsonSnapshot
+	var s *sisu.Snapshot
 	if err := json.Unmarshal(b, &s); err != nil {
 		t.Fatalf("error decoding session s: %s", err)
 	}
-	return s.Snapshot
+	return s
 }
 
 func writeSnapshot(t testing.TB, path string, snapshot *sisu.Snapshot) {
-	b, err := json.Marshal(&jsonSnapshot{Snapshot: snapshot})
+	b, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatalf("error encoding Snapshot: %s", err)
 	}
@@ -117,33 +176,6 @@ func writeSnapshot(t testing.TB, path string, snapshot *sisu.Snapshot) {
 		t.Fatalf("error writing session snapshot to %s: %s", path, err)
 	}
 	t.Logf("Session.Snapshot: %s", b)
-}
-
-type jsonSnapshot struct {
-	*sisu.Snapshot
-	ProofKey jose.JSONWebKey
-}
-
-func (c *jsonSnapshot) MarshalJSON() ([]byte, error) {
-	type Alias jsonSnapshot
-	a := Alias{
-		Snapshot: c.Snapshot,
-		ProofKey: jose.JSONWebKey{
-			Key:       c.Snapshot.ProofKey,
-			Algorithm: string(jose.ES256),
-			Use:       "sig",
-		},
-	}
-	return json.Marshal(a)
-}
-
-func (c *jsonSnapshot) UnmarshalJSON(b []byte) error {
-	type Alias jsonSnapshot
-	if err := json.Unmarshal(b, (*Alias)(c)); err != nil {
-		return err
-	}
-	c.Snapshot.ProofKey = c.ProofKey.Key.(*ecdsa.PrivateKey)
-	return nil
 }
 
 func readToken(t testing.TB, path string) *oauth2.Token {

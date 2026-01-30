@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	rand2 "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"math/rand"
@@ -26,6 +28,12 @@ import (
 	"github.com/yomoggies/nethernet-jsonrpc/minecraft/service"
 )
 
+func deviceID() string {
+	b := make([]byte, 16)
+	_, _ = rand2.Reader.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func TestJSONRPC(t *testing.T) {
 	_, src := auth(t)
 	client, err := xsapi.NewClient(src, nil)
@@ -41,6 +49,9 @@ func TestJSONRPC(t *testing.T) {
 		User: service.UserConfig{
 			TokenType: service.TokenTypePlayFab,
 			Token:     sessionTicket,
+		},
+		Device: service.DeviceConfig{
+			ID: deviceID(),
 		},
 	})
 	if err != nil {
@@ -72,10 +83,35 @@ func TestJSONRPC(t *testing.T) {
 		}
 	})*/
 	networkID, messagingID := rand.Uint64(), claimMessagingID(t, mct)
-	session := publishSession(t, client, networkID, messagingID)
+	// session := publishSession(t, client, networkID, messagingID)
+	t.Log(messagingID)
 
-	doStuff(t, session, conn, networkID, messagingID)
-	// dialConn(t, conn, networkID, messagingID)
+	// doStuff(t, session, conn, networkID, messagingID)
+	dialConn(t, conn, networkID, messagingID)
+}
+
+const remoteMessagingID = ""
+
+func dialConn(t testing.TB, conn *websocket.Conn, networkID uint64, messagingID uuid.UUID) {
+	signaling := newJSONRPCSignaling(t, conn, messagingID, strconv.FormatUint(networkID, 10))
+	c, err := nethernet.Dialer{
+		Log: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+		API: webrtc.NewAPI(func(api *webrtc.API) {
+			factory := logging.NewDefaultLoggerFactory()
+			factory.DefaultLogLevel = logging.LogLevelDebug
+			webrtc.WithSettingEngine(webrtc.SettingEngine{
+				LoggerFactory: factory,
+			})(api)
+		}),
+	}.DialContext(t.Context(), remoteMessagingID, signaling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	t.Logf("%s, %s", c.RemoteAddr(), c.LocalAddr())
 }
 
 func claimMessagingID(t testing.TB, mct *service.Token) uuid.UUID {
@@ -116,7 +152,7 @@ func doStuff(t testing.TB, s *mpsd.Session, conn *websocket.Conn, networkID uint
 	if err != nil {
 		t.Fatalf("error listening on NetherNet: %s", err)
 	}
-	time.AfterFunc(time.Minute, func() {
+	time.AfterFunc(time.Minute*1, func() {
 		if err := l.Close(); err != nil {
 			t.Errorf("error closing NetherNet listener: %s", err)
 		}
