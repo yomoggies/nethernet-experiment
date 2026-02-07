@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	rand2 "crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -25,7 +26,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/pion/logging"
 	"github.com/pion/webrtc/v4"
+	"github.com/sandertv/gophertunnel/minecraft"
+	auth2 "github.com/sandertv/gophertunnel/minecraft/auth"
 	"github.com/yomoggies/nethernet-jsonrpc/minecraft/service"
+	"golang.org/x/oauth2"
 )
 
 func deviceID() string {
@@ -87,10 +91,76 @@ func TestJSONRPC(t *testing.T) {
 	t.Log(messagingID)
 
 	// doStuff(t, session, conn, networkID, messagingID)
-	dialConn(t, conn, networkID, messagingID)
+	// dialConn(t, conn, networkID, messagingID)
+	dialRealms(t, client, mct, d.ServiceEnvironments.Authorization.Environment, conn, networkID, messagingID)
 }
 
-const remoteMessagingID = ""
+const remoteMessagingID = "4"
+
+func dialRealms(t testing.TB, client *xsapi.Client, mct *service.Token, env *service.AuthorizationEnvironment, conn *websocket.Conn, networkID uint64, messagingID uuid.UUID) {
+	signaling := newJSONRPCSignaling(t, conn, messagingID, strconv.FormatUint(networkID, 10))
+	minecraft.RegisterNetwork("nethernet", func(l *slog.Logger) minecraft.Network {
+		return &nnNetwork{Signaling: signaling}
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second*15)
+	defer cancel()
+
+	u, err := url.Parse("https://multiplayer.minecraft.net/authentication")
+	if err != nil {
+		t.Fatalf("error parsing minecraft login chain URL: %s", err)
+	}
+	token, _, err := client.TokenAndSignature(ctx, u)
+	if err != nil {
+		t.Fatalf("error retrieving XSTS token for %s: %s", u, err)
+	}
+	xblToken := new(auth2.XBLToken)
+	xblToken.AuthorizationToken.Token = token.Token
+	xblToken.AuthorizationToken.NotAfter = token.NotAfter
+	xblToken.AuthorizationToken.IssueInstant = token.IssueInstant
+	xblToken.AuthorizationToken.DisplayClaims.UserInfo = []struct {
+		GamerTag string `json:"gtg"`
+		XUID     string `json:"xid"`
+		UserHash string `json:"uhs"`
+	}{
+		{UserHash: token.UserInfo().UserHash},
+	}
+	c, err := minecraft.Dialer{
+		TokenSource: &multiplayerTokenSource{
+			token:       mct,
+			TokenSource: nil, // This is never used so we intentionally set nil
+			Environment: env,
+		},
+		XBLToken: xblToken,
+	}.DialContext(ctx, "nethernet", remoteMessagingID)
+	if err != nil {
+		t.Fatalf("error connecting to Realms: %s", err)
+	}
+	defer c.Close()
+
+	for {
+		pk, err := c.ReadPacket()
+		if err != nil {
+			t.Fatalf("error reading packet: %s", err)
+		}
+		t.Logf("%T", pk)
+	}
+}
+
+type multiplayerTokenSource struct {
+	token       *service.Token
+	Environment *service.AuthorizationEnvironment
+	oauth2.TokenSource
+}
+
+func (s *multiplayerTokenSource) MultiplayerToken(ctx context.Context, publicKey *ecdsa.PublicKey) (string, error) {
+	return s.Environment.MultiplayerToken(ctx, &staticServiceTokenSource{s.token}, publicKey)
+}
+
+type staticServiceTokenSource struct{ token *service.Token }
+
+func (s *staticServiceTokenSource) Token() (*service.Token, error) {
+	return s.token, nil
+}
 
 func dialConn(t testing.TB, conn *websocket.Conn, networkID uint64, messagingID uuid.UUID) {
 	signaling := newJSONRPCSignaling(t, conn, messagingID, strconv.FormatUint(networkID, 10))

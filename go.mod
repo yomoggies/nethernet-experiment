@@ -12,12 +12,17 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/pion/logging v0.2.4
 	github.com/pion/webrtc/v4 v4.1.8
+	github.com/sandertv/gophertunnel v1.53.0
 	golang.org/x/oauth2 v0.34.0
 	golang.org/x/text v0.33.0
 )
 
 require (
 	github.com/creachadair/mds v0.25.13 // indirect
+	github.com/df-mc/go-playfab v1.0.0 // indirect
+	github.com/df-mc/jsonc v1.0.5 // indirect
+	github.com/go-gl/mathgl v1.1.0 // indirect
+	github.com/klauspost/compress v1.18.1 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect
 	github.com/pion/dtls/v3 v3.0.9 // indirect
 	github.com/pion/ice/v4 v4.1.0 // indirect
@@ -32,14 +37,17 @@ require (
 	github.com/pion/stun/v3 v3.0.2 // indirect
 	github.com/pion/transport/v3 v3.1.1 // indirect
 	github.com/pion/turn/v4 v4.1.3 // indirect
+	github.com/sandertv/go-raknet v1.14.3-0.20250305181847-6af3e95113d6 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
+	golang.org/x/image v0.21.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
 )
 
 replace (
-	github.com/df-mc/go-nethernet => github.com/lactyy/go-nethernet v1.0.0-alpha.2.0.20260107091143-efab6f57a8d4
-	github.com/df-mc/go-xsapi => github.com/lactyy/go-xsapi v0.0.0-20260129205551-ec7c13aed847
+	github.com/df-mc/go-nethernet => github.com/lactyy/go-nethernet v1.0.0-alpha.4.0.20260205224444-105a7d090776
+	github.com/df-mc/go-xsapi => github.com/lactyy/go-xsapi v0.0.0-20260130165217-dbb8fd09638b
+	github.com/sandertv/gophertunnel => ./gophertunnel
 )
