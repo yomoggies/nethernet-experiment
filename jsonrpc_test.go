@@ -125,6 +125,9 @@ func dialRealms(t testing.TB, client *xsapi.Client, mct *service.Token, env *ser
 		{UserHash: token.UserInfo().UserHash},
 	}
 	c, err := minecraft.Dialer{
+		ErrorLog: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
 		TokenSource: &multiplayerTokenSource{
 			token:       mct,
 			TokenSource: nil, // This is never used so we intentionally set nil
